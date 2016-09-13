@@ -11,4 +11,5 @@ module.exports = Object.freeze({
   getFactory(args) {
     return _.isArray(args[1]) ? args[2] : args[1];
   }
+  
 });

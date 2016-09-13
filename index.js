@@ -1,4 +1,5 @@
 'use strict';
+
 const _ = require('lodash');
 const joi = require('joi');
 const argumentParser = require('./argument-parser');
@@ -6,20 +7,13 @@ const argumentParser = require('./argument-parser');
 let services = {};
 let factories = {};
 let instances = {};
+let reverseDependencies = {};
 let interfaces = {};
 
 const SCHEMA_SERVICE = joi.object({
   factory: joi.func().required(),
   dependencies: joi.array().required()
 }).required();
-
-module.exports = Object.freeze({  
-  service,
-  factory,
-  iface,
-  get: get,
-  reset
-});
 
 function service() {
   const args = Array.from(arguments);
@@ -30,7 +24,35 @@ function service() {
   joi.assert(dependencies, joi.array().items(joi.string()), 'Dependencies must be string name of services!');
   joi.assert(factory, joi.func().required(), 'Implementation missing!');
   setService(serviceName, factory, dependencies);
+  hotReloadInstances(serviceName);
+  reloadDepending(serviceName);
   return serviceName;
+}
+
+function registered(serviceName) {
+  const valid = joi.validate(services[serviceName], SCHEMA_SERVICE);
+  return (valid.error === null); 
+}
+
+function hotReloadInstances(serviceName) {
+  if (_.has(instances, serviceName)) {
+    _.get(instances, serviceName);
+  }
+}
+
+function reloadDepending(serviceName) {
+  const dependingServices = getReverseDependencies(serviceName);
+  for (let dependingService of dependingServices) {
+    if (_.has(instances, dependingService)) {
+      constructServiceInstance(dependingService);
+    }
+  }
+}
+
+function reloadServiceIfExists(serviceName) {
+  if (_.has(instances, serviceName)) {
+    constructServiceInstance(serviceName);
+  }
 }
 
 function setService(serviceName, factory, dependencies) {
@@ -50,6 +72,16 @@ function getImplementations(interfaceName) {
   return _.get(interfaces, interfaceName, []);
 }
 
+function addReverseDependency(dependencyName, serviceName) {
+  const reverseDeps = getReverseDependencies(dependencyName);
+  reverseDeps.push(serviceName);
+  _.set(reverseDependencies, dependencyName, _.uniq(reverseDeps));
+}
+
+function getReverseDependencies(dependencyName) {
+  return _.get(reverseDependencies, dependencyName, []);
+}
+
 function factory() {
   const serviceName = service.apply(null, Array.from(arguments));
   _.set(factories, serviceName, true);
@@ -58,7 +90,7 @@ function factory() {
 
 function get(serviceName) {
   joi.assert(_.get(services, serviceName), SCHEMA_SERVICE, serviceName + ' service definition missing!');
-  return _.get(instances, serviceName, () => constructInstance(serviceName))();
+  return _.get(instances, serviceName, () => constructServiceInstance(serviceName))();
 }
 
 function iface(interfaceName, serviceName) {
@@ -66,21 +98,38 @@ function iface(interfaceName, serviceName) {
   addImplementation(interfaceName, serviceName);
 }
 
-function interfaceFactory(interfaceName, serviceName) {
+function wrap(factory, dependencies) {
+  joi.assert(factory, joi.func().required(), 'The factory must be a pure function!');
+  joi.assert(factory.name, joi.string().required(), 'The factory has to have a name!');
+  service(factory.name, dependencies || [], factory);
+  return () => get(factory.name);
+}
+
+function change(serviceName, factory) {
+  joi.assert(factory, joi.func().required(), 'The factory must be a pure function!');
+  joi.assert(serviceName, joi.string().required(), 'The service name has to be a string!');
+  const deps = _.get(services, serviceName).dependencies;
+  service.apply(null, [serviceName, deps, factory]);
+  reloadServiceIfExists(serviceName);
+}
+
+function interfaceFactory(interfaceName, serviceName) {  
   const implementations = getImplementations(interfaceName);
-  const SCHEMA_INTERFACES = joi.array().sparse().items(joi.string().valid(serviceName)).required(); 
-  joi.assert(implementations, SCHEMA_INTERFACES, `There is no implementations for ${interfaceName}!`);
+  const SCHEMA_INTERFACES = joi.array().items(joi.string().valid(serviceName).required(), joi.any()).required(); 
+  joi.assert(implementations, SCHEMA_INTERFACES, `There is no implementation for ${interfaceName}!`);
   return get(serviceName);
 }
 
-function constructInstance(serviceName) {
-  const dependencyInstances = services[serviceName].dependencies.map(get);
-  const serviceInstance = services[serviceName].factory.apply(null, dependencyInstances);
+function constructServiceInstance(serviceName) {
+  const dependencies = _.get(services, serviceName, {}).dependencies || [];
+  const dependencyInstances = dependencies.map(get);
+  const serviceInstance = _.get(services, serviceName, {}).factory.apply(null, dependencyInstances);
   return factories[serviceName] === true ? 
-    serviceInstance : storeInstance(serviceName, serviceInstance);
+    serviceInstance : storeServiceInstance(serviceName, serviceInstance, dependencies);
 }
 
-function storeInstance(serviceName, serviceInstance) {
+function storeServiceInstance(serviceName, serviceInstance, dependencies) {
+  dependencies.map(dependencyName => addReverseDependency(dependencyName, serviceName));
   _.set(instances, serviceName, () => serviceInstance);
   return serviceInstance;
 }
@@ -91,4 +140,16 @@ function reset() {
   instances = {};
   interfaces = {};
 }
+
+module.exports = Object.freeze({
+  service,
+  registered,
+  factory,
+  iface,
+  wrap,
+  change,
+  get: get,
+  reset
+});
+
 
